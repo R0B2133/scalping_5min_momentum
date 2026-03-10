@@ -7,6 +7,7 @@ Coinbase Advanced Trade momentum scalper for 5-minute or 1-minute spot execution
 - authenticated Coinbase REST client for candles, product rules, balances, and orders
 - EMA/RSI/VWAP/ATR momentum strategy
 - paper-trading and live-trading runner
+- multi-asset backtesting for Coinbase perpetuals
 - persistent local JSON state for open position tracking
 
 ## Files
@@ -14,6 +15,7 @@ Coinbase Advanced Trade momentum scalper for 5-minute or 1-minute spot execution
 - `coinbase_advanced.py`: Coinbase Advanced Trade REST client
 - `scalping_strategy.py`: indicator calculation and signal logic
 - `run_coinbase_scalper.py`: executable entrypoint
+- `back_testing/`: historical simulation package for perpetual markets
 - `requirements.txt`: Python dependencies
 - `.gitignore`: local repo hygiene
 
@@ -73,5 +75,6 @@ py scalping_5min_momentum\run_coinbase_scalper.py `
 
 - `paper` mode updates a simulated wallet in the state file.
 - `live` mode uses Coinbase order preview before order submission.
+- `back_testing` includes a simulator for `BTC-PERP`, `ETH-PERP`, `SOL-PERP`, and `XRP-PERP`.
 - Default parameters are configurable through CLI flags in `run_coinbase_scalper.py`.
 - The strategy was implemented from an explicit momentum-scalping assumption because the PDF rules were not machine-readable in this shell.

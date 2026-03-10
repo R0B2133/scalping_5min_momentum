@@ -79,10 +79,14 @@ def load_coinbase_credentials(credentials_path: Optional[str] = None) -> Coinbas
     if credentials_path:
         candidates.append(Path(credentials_path))
     else:
+        module_dir = Path(__file__).resolve().parent
+        quant_lab_dir = module_dir.parent
         candidates.extend(
             [
                 Path("cdp_api_key.json"),
                 Path("quant-lab/cdp_api_key.json"),
+                quant_lab_dir / "cdp_api_key.json",
+                Path(r"D:\Quant\quant-lab\cdp_api_key.json"),
                 Path.home() / "cdp_api_key.json",
             ]
         )
@@ -221,6 +225,40 @@ class CoinbaseAdvancedClient:
                 continue
             balances[currency] = float(available)
         return balances
+
+    def get_transaction_summary(
+        self,
+        *,
+        product_type: Optional[str] = None,
+        contract_expiry_type: Optional[str] = None,
+        product_venue: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if product_type:
+            params["product_type"] = product_type
+        if contract_expiry_type:
+            params["contract_expiry_type"] = contract_expiry_type
+        if product_venue:
+            params["product_venue"] = product_venue
+        return self._request("GET", f"{API_BASE_PATH}/transaction_summary", params=params)
+
+    def get_fee_rates(
+        self,
+        *,
+        product_type: str = "FUTURE",
+        product_venue: str = "INTX",
+    ) -> dict[str, Any]:
+        payload = self.get_transaction_summary(
+            product_type=product_type,
+            product_venue=product_venue,
+        )
+        fee_tier = payload.get("fee_tier", {})
+        return {
+            "pricing_tier": fee_tier.get("pricing_tier"),
+            "maker_fee_rate": float(fee_tier.get("maker_fee_rate", 0.0) or 0.0),
+            "taker_fee_rate": float(fee_tier.get("taker_fee_rate", 0.0) or 0.0),
+            "margin_rate": float(payload.get("margin_rate", 0.0) or 0.0),
+        }
 
     def get_candles(
         self,
