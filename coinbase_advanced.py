@@ -69,6 +69,19 @@ def format_size(
     return _format_decimal(Decimal(str(rounded)))
 
 
+def _product_id_candidates(product_id: str) -> list[str]:
+    candidates = [product_id]
+    if product_id.endswith("-INTX"):
+        candidates.append(product_id[: -len("-INTX")])
+    elif product_id.endswith("-PERP"):
+        candidates.append(f"{product_id}-INTX")
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
 def load_coinbase_credentials(credentials_path: Optional[str] = None) -> CoinbaseCredentials:
     env_key_name = os.getenv("COINBASE_KEY_NAME")
     env_private_key = os.getenv("COINBASE_PRIVATE_KEY")
@@ -149,6 +162,7 @@ class CoinbaseAdvancedClient:
         self.credentials = credentials or load_coinbase_credentials(credentials_path)
         self.session = session or requests.Session()
         self.base_url = base_url.rstrip("/")
+        self._resolved_product_ids: dict[str, str] = {}
 
     def _request(
         self,
@@ -191,14 +205,31 @@ class CoinbaseAdvancedClient:
                 f"Coinbase response for {method.upper()} {path} was not valid JSON"
             ) from exc
 
+    def resolve_product_id(self, product_id: str) -> str:
+        cached = self._resolved_product_ids.get(product_id)
+        if cached:
+            return cached
+        for candidate in _product_id_candidates(product_id):
+            try:
+                self._request("GET", f"{API_BASE_PATH}/products/{candidate}")
+            except RuntimeError:
+                continue
+            self._resolved_product_ids[product_id] = candidate
+            self._resolved_product_ids[candidate] = candidate
+            return candidate
+        self._resolved_product_ids[product_id] = product_id
+        return product_id
+
     def get_product(self, product_id: str) -> dict[str, Any]:
-        return self._request("GET", f"{API_BASE_PATH}/products/{product_id}")
+        resolved_product_id = self.resolve_product_id(product_id)
+        return self._request("GET", f"{API_BASE_PATH}/products/{resolved_product_id}")
 
     def get_best_bid_ask(self, product_ids: list[str]) -> dict[str, Any]:
+        resolved_product_ids = [self.resolve_product_id(product_id) for product_id in product_ids]
         return self._request(
             "GET",
             f"{API_BASE_PATH}/best_bid_ask",
-            params={"product_ids": product_ids},
+            params={"product_ids": resolved_product_ids},
         )
 
     def list_accounts(self) -> list[dict[str, Any]]:
@@ -268,7 +299,8 @@ class CoinbaseAdvancedClient:
         granularity: str,
         limit: int = MAX_CANDLES_PER_REQUEST,
     ) -> pd.DataFrame:
-        path = f"{API_BASE_PATH}/products/{product_id}/candles"
+        resolved_product_id = self.resolve_product_id(product_id)
+        path = f"{API_BASE_PATH}/products/{resolved_product_id}/candles"
         payload = self._request(
             "GET",
             path,
@@ -333,12 +365,16 @@ class CoinbaseAdvancedClient:
         *,
         quote_size: Optional[float] = None,
         base_size: Optional[float] = None,
+        leverage: Optional[float] = None,
+        margin_type: Optional[str] = None,
     ) -> dict[str, Any]:
         payload = self._build_market_order_payload(
-            product_id=product_id,
+            product_id=self.resolve_product_id(product_id),
             side=side,
             quote_size=quote_size,
             base_size=base_size,
+            leverage=leverage,
+            margin_type=margin_type,
         )
         return self._request("POST", f"{API_BASE_PATH}/orders/preview", json_body=payload)
 
@@ -349,14 +385,18 @@ class CoinbaseAdvancedClient:
         *,
         quote_size: Optional[float] = None,
         base_size: Optional[float] = None,
+        leverage: Optional[float] = None,
+        margin_type: Optional[str] = None,
         preview_id: Optional[str] = None,
         client_order_id: Optional[str] = None,
     ) -> dict[str, Any]:
         payload = self._build_market_order_payload(
-            product_id=product_id,
+            product_id=self.resolve_product_id(product_id),
             side=side,
             quote_size=quote_size,
             base_size=base_size,
+            leverage=leverage,
+            margin_type=margin_type,
             client_order_id=client_order_id,
         )
         if preview_id:
@@ -370,6 +410,8 @@ class CoinbaseAdvancedClient:
         side: str,
         quote_size: Optional[float] = None,
         base_size: Optional[float] = None,
+        leverage: Optional[float] = None,
+        margin_type: Optional[str] = None,
         client_order_id: Optional[str] = None,
     ) -> dict[str, Any]:
         if quote_size is None and base_size is None:
@@ -380,6 +422,10 @@ class CoinbaseAdvancedClient:
             configuration["quote_size"] = _format_decimal(Decimal(str(quote_size)))
         if base_size is not None:
             configuration["base_size"] = _format_decimal(Decimal(str(base_size)))
+        if leverage is not None:
+            configuration["leverage"] = _format_decimal(Decimal(str(leverage)))
+        if margin_type is not None:
+            configuration["margin_type"] = margin_type.upper()
 
         return {
             "client_order_id": client_order_id or str(uuid.uuid4()),
@@ -392,8 +438,9 @@ class CoinbaseAdvancedClient:
 
     @staticmethod
     def get_top_of_book(best_bid_ask_payload: dict[str, Any], product_id: str) -> dict[str, float]:
+        product_candidates = set(_product_id_candidates(product_id))
         for pricebook in best_bid_ask_payload.get("pricebooks", []):
-            if pricebook.get("product_id") != product_id:
+            if pricebook.get("product_id") not in product_candidates:
                 continue
             bid = float((pricebook.get("bids") or [{}])[0].get("price", 0.0))
             ask = float((pricebook.get("asks") or [{}])[0].get("price", 0.0))

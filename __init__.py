@@ -1,1 +1,1 @@
-"""Coinbase spot scalping strategy package."""
+"""Coinbase perpetual futures breakout scalping package."""

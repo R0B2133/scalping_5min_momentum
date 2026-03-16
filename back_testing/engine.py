@@ -5,14 +5,18 @@ from typing import Optional
 
 import pandas as pd  # type: ignore
 
-from scalping_5min_momentum.scalping_strategy import ScalpingConfig, add_indicators
+from scalping_5min_momentum.scalping_strategy import (
+    BreakoutConfig,
+    approximate_liquidation_price,
+    build_signal_frame,
+    calculate_position_size,
+)
 
 
 @dataclass
 class BacktestConfig:
     starting_cash: float = 10000.0
-    leverage: float = 50.0
-    position_allocation: float = 0.81
+    leverage: float = 2.0
     maker_fee_rate: float = 0.0
     taker_fee_rate: float = 0.0003
     entry_liquidity: str = "taker"
@@ -35,7 +39,6 @@ class AssetBacktestResult:
     candles_count: int
     fees_paid: float
     leverage: float
-    position_allocation_pct: float
     trades_frame: pd.DataFrame
     equity_curve: pd.DataFrame
 
@@ -54,18 +57,18 @@ class AssetBacktestResult:
             "candles_count": self.candles_count,
             "fees_paid": round(self.fees_paid, 4),
             "leverage": round(self.leverage, 2),
-            "position_allocation_pct": round(self.position_allocation_pct, 2),
         }
 
 
 def run_backtest_for_asset(
     product_id: str,
     candles: pd.DataFrame,
-    strategy_config: ScalpingConfig,
+    strategy_config: BreakoutConfig,
     backtest_config: BacktestConfig,
     granularity: str,
 ) -> AssetBacktestResult:
-    feature_frame = add_indicators(candles, strategy_config)
+    strategy_config = _strategy_with_backtest_leverage(strategy_config, backtest_config.leverage)
+    feature_frame = build_signal_frame(candles, strategy_config)
     if len(feature_frame) < 3:
         raise ValueError(f"Not enough candles to backtest {product_id}")
 
@@ -81,8 +84,8 @@ def run_backtest_for_asset(
         liquidity=backtest_config.exit_liquidity,
     )
     cash = backtest_config.starting_cash
+    pending_entry: Optional[dict[str, float | str]] = None
     position: Optional[dict[str, float | str]] = None
-    pending_order: Optional[dict[str, float | str]] = None
     trades: list[dict[str, float | str]] = []
     equity_rows: list[dict[str, float | str]] = []
     exposure_bars = 0
@@ -90,80 +93,66 @@ def run_backtest_for_asset(
 
     for index in range(1, len(feature_frame)):
         current = feature_frame.iloc[index]
-        previous = feature_frame.iloc[index - 1]
         timestamp = feature_frame.index[index]
 
-        if pending_order is not None:
-            pending_action = str(pending_order["action"])
+        if pending_entry is not None and position is None:
+            direction = str(pending_entry["direction"])
             open_price = float(current["open"])
-
-            if pending_action == "BUY" and position is None:
-                fill_price = open_price * (1 + slippage_rate)
-                margin_used, notional = _resolve_entry_exposure(
+            fill_price = _apply_entry_slippage(open_price, direction, slippage_rate)
+            stop_reference = float(pending_entry["stop_reference_price"])
+            try:
+                size_plan = calculate_position_size(
                     equity=cash,
-                    position_allocation=backtest_config.position_allocation,
-                    leverage=backtest_config.leverage,
+                    entry_price=fill_price,
+                    stop_reference_price=stop_reference,
+                    direction=direction,
+                    config=strategy_config,
                     fee_rate=entry_fee_rate,
                 )
-                if notional >= strategy_config.min_quote_notional:
-                    entry_fee = notional * entry_fee_rate
-                    quantity = notional / fill_price
-                    cash -= entry_fee
-                    total_fees_paid += entry_fee
-                    atr = float(pending_order["atr"])
-                    position = {
-                        "entry_time": timestamp.isoformat(),
-                        "entry_price": fill_price,
-                        "quantity": quantity,
-                        "notional": notional,
-                        "margin_used": margin_used,
-                        "entry_fee": entry_fee,
-                        "stop_price": fill_price - atr * strategy_config.stop_atr_multiple,
-                        "take_profit_price": fill_price
-                        + atr * strategy_config.take_profit_atr_multiple,
-                        "liquidation_price": fill_price
-                        * max(0.0, (1 - 1 / max(backtest_config.leverage, 1e-9))),
-                        "bars_held": 0.0,
-                        "entry_reason": str(pending_order["reason"]),
-                    }
-            elif pending_action == "SELL" and position is not None:
-                cash, trades, fee_paid = _close_position(
-                    cash=cash,
-                    position=position,
-                    exit_price=open_price * (1 - slippage_rate),
-                    exit_time=timestamp.isoformat(),
-                    exit_reason=str(pending_order["reason"]),
-                    trades=trades,
-                    fee_rate=exit_fee_rate,
-                )
-                total_fees_paid += fee_paid
-                position = None
+            except ValueError:
+                pending_entry = None
+                equity_rows.append({"timestamp": timestamp.isoformat(), "equity": cash})
+                continue
 
-            pending_order = None
+            quantity = size_plan.quantity
+            notional = size_plan.notional
+            entry_fee = notional * entry_fee_rate
+            cash -= entry_fee
+            total_fees_paid += entry_fee
+            position = {
+                "direction": direction,
+                "entry_time": timestamp.isoformat(),
+                "signal_time": str(pending_entry["signal_time"]),
+                "entry_price": fill_price,
+                "quantity": quantity,
+                "notional": notional,
+                "margin_used": size_plan.margin_used,
+                "entry_fee": entry_fee,
+                "stop_price": size_plan.stop_price,
+                "take_profit_price": size_plan.take_profit_price,
+                "liquidation_price": approximate_liquidation_price(
+                    fill_price,
+                    direction=direction,
+                    leverage=backtest_config.leverage,
+                ),
+                "bars_held": 0.0,
+                "entry_reason": str(pending_entry["reason"]),
+                "box_high": float(pending_entry["box_high"]),
+                "box_low": float(pending_entry["box_low"]),
+            }
+            pending_entry = None
 
         if position is not None:
             exposure_bars += 1
             position["bars_held"] = float(position["bars_held"]) + 1.0
 
-            stop_price = float(position["stop_price"])
-            take_profit_price = float(position["take_profit_price"])
-            liquidation_price = float(position["liquidation_price"])
-            low_price = float(current["low"])
-            high_price = float(current["high"])
-
-            intrabar_exit: Optional[tuple[float, str]] = None
-            if low_price <= liquidation_price:
-                intrabar_exit = (
-                    liquidation_price * (1 - slippage_rate),
-                    "Approx liquidation",
-                )
-            elif low_price <= stop_price:
-                intrabar_exit = (stop_price * (1 - slippage_rate), "ATR stop-loss")
-            elif high_price >= take_profit_price:
-                intrabar_exit = (take_profit_price * (1 - slippage_rate), "ATR take-profit")
-
+            intrabar_exit = _resolve_intrabar_exit(
+                current=current,
+                position=position,
+                slippage_rate=slippage_rate,
+            )
             if intrabar_exit is not None:
-                cash, trades, fee_paid = _close_position(
+                cash, fee_paid = _close_position(
                     cash=cash,
                     position=position,
                     exit_price=intrabar_exit[0],
@@ -174,41 +163,27 @@ def run_backtest_for_asset(
                 )
                 total_fees_paid += fee_paid
                 position = None
-            else:
-                trailing_stop = max(
-                    stop_price,
-                    float(current["close"])
-                    - float(current["atr"]) * strategy_config.trailing_atr_multiple,
-                )
-                exit_reason = _close_signal_reason(
-                    row=current,
-                    trailing_stop=trailing_stop,
-                    config=strategy_config,
-                )
-                if exit_reason and index < len(feature_frame) - 1:
-                    pending_order = {"action": "SELL", "reason": exit_reason}
-                else:
-                    position["stop_price"] = trailing_stop
-                    position["take_profit_price"] = take_profit_price
 
-        if position is None and pending_order is None and index < len(feature_frame) - 1:
-            checks = _entry_checks(current=current, previous=previous, config=strategy_config)
-            if all(checks.values()):
-                pending_order = {
-                    "action": "BUY",
-                    "reason": "EMA trend, RSI, VWAP, and volume aligned",
-                    "atr": float(current["atr"]),
+        if position is None and pending_entry is None and index < len(feature_frame) - 1:
+            decision = _entry_decision_from_row(current=current)
+            if decision is not None:
+                pending_entry = {
+                    "direction": decision["direction"],
+                    "reason": decision["reason"],
+                    "stop_reference_price": float(decision["stop_reference_price"]),
+                    "signal_time": timestamp.isoformat(),
+                    "box_high": float(current["box_high"]),
+                    "box_low": float(current["box_low"]),
                 }
 
-        close_price = float(current["close"])
         marked_equity = cash
         if position is not None:
-            marked_equity += _unrealized_pnl(position, close_price)
+            marked_equity += _unrealized_pnl(position=position, mark_price=float(current["close"]))
         equity_rows.append({"timestamp": timestamp.isoformat(), "equity": marked_equity})
 
     if position is not None:
         last_bar = feature_frame.iloc[-1]
-        cash, trades, fee_paid = _close_position(
+        cash, fee_paid = _close_position(
             cash=cash,
             position=position,
             exit_price=float(last_bar["close"]),
@@ -218,7 +193,6 @@ def run_backtest_for_asset(
             fee_rate=exit_fee_rate,
         )
         total_fees_paid += fee_paid
-        position = None
         equity_rows.append(
             {
                 "timestamp": feature_frame.index[-1].isoformat(),
@@ -252,26 +226,31 @@ def run_backtest_for_asset(
         candles_count=len(feature_frame),
         fees_paid=total_fees_paid,
         leverage=backtest_config.leverage,
-        position_allocation_pct=backtest_config.position_allocation * 100,
         trades_frame=trades_frame,
         equity_curve=equity_curve,
     )
 
 
-def _resolve_entry_exposure(
-    *,
-    equity: float,
-    position_allocation: float,
+def _strategy_with_backtest_leverage(
+    strategy_config: BreakoutConfig,
     leverage: float,
-    fee_rate: float,
-) -> tuple[float, float]:
-    if equity <= 0 or leverage <= 0 or position_allocation <= 0:
-        return 0.0, 0.0
-    unclamped_margin = equity * position_allocation
-    max_margin = equity / (1 + leverage * fee_rate)
-    margin_used = min(unclamped_margin, max_margin)
-    notional = margin_used * leverage
-    return margin_used, notional
+) -> BreakoutConfig:
+    return BreakoutConfig(
+        timeframe_mode=strategy_config.timeframe_mode,
+        signal_granularity=strategy_config.signal_granularity,
+        context_granularity=strategy_config.context_granularity,
+        reward_risk_ratio=strategy_config.reward_risk_ratio,
+        atr_period=strategy_config.atr_period,
+        volume_window=strategy_config.volume_window,
+        min_box_atr_ratio=strategy_config.min_box_atr_ratio,
+        min_volume_ratio=strategy_config.min_volume_ratio,
+        risk_fraction=strategy_config.risk_fraction,
+        leverage=leverage,
+        min_position_notional=strategy_config.min_position_notional,
+        max_position_notional=strategy_config.max_position_notional,
+        kalman_process_variance=strategy_config.kalman_process_variance,
+        kalman_measurement_variance=strategy_config.kalman_measurement_variance,
+    )
 
 
 def _fee_rate_for_liquidity(*, maker_rate: float, taker_rate: float, liquidity: str) -> float:
@@ -280,33 +259,61 @@ def _fee_rate_for_liquidity(*, maker_rate: float, taker_rate: float, liquidity: 
     return taker_rate
 
 
-def _entry_checks(
+def _apply_entry_slippage(price: float, direction: str, slippage_rate: float) -> float:
+    if direction == "LONG":
+        return price * (1 + slippage_rate)
+    return price * (1 - slippage_rate)
+
+
+def _apply_exit_slippage(price: float, direction: str, slippage_rate: float) -> float:
+    if direction == "LONG":
+        return price * (1 - slippage_rate)
+    return price * (1 + slippage_rate)
+
+
+def _entry_decision_from_row(current: pd.Series) -> Optional[dict[str, float | str]]:
+    if bool(current["long_breakout"]) and bool(current["kalman_long_ok"]) and bool(current["volatility_ok"]) and bool(current["volume_ok"]):
+        return {
+            "direction": "LONG",
+            "reason": "Long breakout above prior box high",
+            "stop_reference_price": float(current["low"]),
+        }
+    if bool(current["short_breakout"]) and bool(current["kalman_short_ok"]) and bool(current["volatility_ok"]) and bool(current["volume_ok"]):
+        return {
+            "direction": "SHORT",
+            "reason": "Short breakout below prior box low",
+            "stop_reference_price": float(current["high"]),
+        }
+    return None
+
+
+def _resolve_intrabar_exit(
+    *,
     current: pd.Series,
-    previous: pd.Series,
-    config: ScalpingConfig,
-) -> dict[str, bool]:
-    close_price = float(current["close"])
-    return {
-        "trend": close_price > float(current["ema_fast"]) > float(current["ema_slow"]),
-        "momentum": config.min_rsi_entry <= float(current["rsi"]) <= config.max_rsi_entry,
-        "vwap": close_price >= float(current["vwap"]),
-        "volume": float(current["volume"]) >= float(current["volume_ma"]) * config.min_volume_ratio,
-        "ema_slope": float(current["ema_fast"]) > float(previous["ema_fast"]),
-    }
+    position: dict[str, float | str],
+    slippage_rate: float,
+) -> Optional[tuple[float, str]]:
+    direction = str(position["direction"])
+    low_price = float(current["low"])
+    high_price = float(current["high"])
+    stop_price = float(position["stop_price"])
+    take_profit_price = float(position["take_profit_price"])
+    liquidation_price = float(position["liquidation_price"])
 
-
-def _close_signal_reason(
-    row: pd.Series,
-    trailing_stop: float,
-    config: ScalpingConfig,
-) -> Optional[str]:
-    close_price = float(row["close"])
-    if close_price <= trailing_stop:
-        return "ATR trailing stop"
-    if float(row["rsi"]) <= config.exit_rsi:
-        return "RSI momentum fade"
-    if close_price < float(row["ema_fast"]) or close_price < float(row["vwap"]):
-        return "Intraday trend breakdown"
+    if direction == "LONG":
+        if low_price <= liquidation_price:
+            return (_apply_exit_slippage(liquidation_price, direction, slippage_rate), "Approx liquidation")
+        if low_price <= stop_price:
+            return (_apply_exit_slippage(stop_price, direction, slippage_rate), "Stop-loss")
+        if high_price >= take_profit_price:
+            return (_apply_exit_slippage(take_profit_price, direction, slippage_rate), "Take-profit")
+    else:
+        if high_price >= liquidation_price:
+            return (_apply_exit_slippage(liquidation_price, direction, slippage_rate), "Approx liquidation")
+        if high_price >= stop_price:
+            return (_apply_exit_slippage(stop_price, direction, slippage_rate), "Stop-loss")
+        if low_price <= take_profit_price:
+            return (_apply_exit_slippage(take_profit_price, direction, slippage_rate), "Take-profit")
     return None
 
 
@@ -319,39 +326,55 @@ def _close_position(
     exit_reason: str,
     trades: list[dict[str, float | str]],
     fee_rate: float,
-) -> tuple[float, list[dict[str, float | str]], float]:
+) -> tuple[float, float]:
+    direction = str(position["direction"])
     quantity = float(position["quantity"])
     exit_notional = quantity * exit_price
-    realized_pnl = quantity * (exit_price - float(position["entry_price"]))
+    if direction == "LONG":
+        realized_pnl = quantity * (exit_price - float(position["entry_price"]))
+    else:
+        realized_pnl = quantity * (float(position["entry_price"]) - exit_price)
     exit_fee = exit_notional * fee_rate
     net_pnl = realized_pnl - float(position["entry_fee"]) - exit_fee
-    pnl_pct = net_pnl / float(position["margin_used"]) * 100 if float(position["margin_used"]) else 0.0
+    margin_used = float(position["margin_used"])
+    pnl_pct = net_pnl / margin_used * 100 if margin_used else 0.0
     cash += realized_pnl - exit_fee
+
     trades.append(
         {
+            "direction": direction,
+            "signal_time": str(position["signal_time"]),
             "entry_time": str(position["entry_time"]),
             "exit_time": exit_time,
             "entry_price": round(float(position["entry_price"]), 8),
             "exit_price": round(exit_price, 8),
             "quantity": round(quantity, 8),
             "notional": round(float(position["notional"]), 8),
-            "margin_used": round(float(position["margin_used"]), 8),
+            "margin_used": round(margin_used, 8),
             "entry_fee": round(float(position["entry_fee"]), 8),
             "exit_fee": round(exit_fee, 8),
             "pnl": round(net_pnl, 8),
             "pnl_pct": round(pnl_pct, 8),
             "bars_held": int(float(position["bars_held"])),
             "liquidation_price": round(float(position["liquidation_price"]), 8),
+            "stop_price": round(float(position["stop_price"]), 8),
+            "take_profit_price": round(float(position["take_profit_price"]), 8),
+            "box_high": round(float(position["box_high"]), 8),
+            "box_low": round(float(position["box_low"]), 8),
             "entry_reason": str(position["entry_reason"]),
             "exit_reason": exit_reason,
         }
     )
-    return cash, trades, exit_fee
+    return cash, exit_fee
 
 
 def _unrealized_pnl(position: dict[str, float | str], mark_price: float) -> float:
+    direction = str(position["direction"])
     quantity = float(position["quantity"])
-    return quantity * (mark_price - float(position["entry_price"]))
+    entry_price = float(position["entry_price"])
+    if direction == "LONG":
+        return quantity * (mark_price - entry_price)
+    return quantity * (entry_price - mark_price)
 
 
 def _compute_max_drawdown_pct(equity_series: pd.Series) -> float:

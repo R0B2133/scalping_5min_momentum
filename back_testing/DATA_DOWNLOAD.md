@@ -2,13 +2,16 @@
 
 Use `download_coinbase_candles.ps1` to fetch historical Coinbase candles as CSV.
 
+For the current breakout strategy, the default research dataset is perpetual futures data at `ONE_MINUTE`,
+because the runner/backtest can resample that into the `strict_1m_on_5m` context internally.
+
 ## Inputs
 
 - `ProductId`
-  - spot examples: `BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`
   - perpetual examples: `BTC-PERP`, `ETH-PERP`, `SOL-PERP`, `XRP-PERP`
 - `Granularity`
-  - for this strategy: `FIVE_MINUTE`
+  - for this strategy: `ONE_MINUTE` for `strict_1m_on_5m`
+  - `FIVE_MINUTE` is still valid for `5m_only`
 - `StartUtc`
   - ISO-8601 UTC time such as `2016-01-01T00:00:00Z`
 - `EndUtc`
@@ -16,15 +19,15 @@ Use `download_coinbase_candles.ps1` to fetch historical Coinbase candles as CSV.
 - `OutputPath`
   - CSV destination
 
-## BTC 10-Year Example
+## BTC Perp Example
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scalping_5min_momentum\back_testing\download_coinbase_candles.ps1 `
-  -ProductId BTC-USD `
-  -Granularity FIVE_MINUTE `
+  -ProductId BTC-PERP `
+  -Granularity ONE_MINUTE `
   -StartUtc 2016-01-01T00:00:00Z `
   -EndUtc 2026-03-08T23:59:00Z `
-  -OutputPath D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\BTC_USD_FIVE_MINUTE_20160101_20260308.csv
+  -OutputPath D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\BTC_PERP_ONE_MINUTE_20160101_20260308.csv
 ```
 
 ## Other Assets
@@ -33,11 +36,11 @@ ETH:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scalping_5min_momentum\back_testing\download_coinbase_candles.ps1 `
-  -ProductId ETH-USD `
-  -Granularity FIVE_MINUTE `
+  -ProductId ETH-PERP `
+  -Granularity ONE_MINUTE `
   -StartUtc 2016-01-01T00:00:00Z `
   -EndUtc 2026-03-08T23:59:00Z `
-  -OutputPath D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\ETH_USD_FIVE_MINUTE_20160101_20260308.csv
+  -OutputPath D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\ETH_PERP_ONE_MINUTE_20160101_20260308.csv
 ```
 
 SOL:

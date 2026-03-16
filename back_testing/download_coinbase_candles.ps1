@@ -1,10 +1,10 @@
 param(
-    [string]$ProductId = "BTC-USD",
-    [string]$Granularity = "FIVE_MINUTE",
+    [string]$ProductId = "BTC-PERP",
+    [string]$Granularity = "ONE_MINUTE",
     [string]$StartUtc = "2016-01-01T00:00:00Z",
     [string]$EndUtc = "2026-03-08T23:59:00Z",
     [string]$CredentialsPath = "D:\Quant\quant-lab\cdp_api_key.json",
-    [string]$OutputPath = "D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\BTC_USD_FIVE_MINUTE_20160101_20260308.csv",
+    [string]$OutputPath = "D:\Quant\quant-lab\scalping_5min_momentum\back_testing\data\BTC_PERP_ONE_MINUTE_20160101_20260308.csv",
     [int]$Limit = 350,
     [int]$PauseMilliseconds = 125,
     [int]$MaxRetries = 5

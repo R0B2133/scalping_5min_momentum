@@ -1,6 +1,6 @@
 # Back Testing
 
-This folder contains a historical simulator for the `scalping_5min_momentum` strategy.
+This folder contains the historical simulator for the perps box-breakout strategy.
 
 ## Default Market Set
 
@@ -11,40 +11,38 @@ This folder contains a historical simulator for the `scalping_5min_momentum` str
 
 ## What It Does
 
-- downloads historical Coinbase perpetual candles
+- downloads historical Coinbase perpetual candles using the signal timeframe
 - caches each request to CSV under `back_testing/data`
-- runs the momentum strategy on each market independently
+- runs the breakout strategy on each market independently
+- supports both `strict_1m_on_5m` and `5m_only` modes
+- models long and short positions, leverage, fees, slippage, and approximate liquidation
 - writes trades, equity curves, and a summary under `back_testing/output`
-- can query current maker/taker fee rates from Coinbase via the Advanced Trade API
-- supports configurable margin allocation and leverage in the simulator
-- includes a reusable PowerShell downloader for long-range historical CSV exports
 
 ## Key Assumptions
 
-- long-only strategy
-- signal is generated on bar close
-- close-based signal orders execute on the next bar open
-- futures sizing uses margin allocation multiplied by leverage to determine notional exposure
-- ATR stop-loss and take-profit are checked against candle low/high
-- stop-loss wins if stop and target are both hit in the same candle
-- liquidation is modeled approximately from entry price and leverage
-- fees and slippage are configurable
+- signals are generated on bar close
+- entry orders fill at the next bar open
+- stop-loss and take-profit are checked against candle high/low intrabar
+- stop-loss wins if stop and target are both hit inside the same candle
+- sizing is based on configured account risk and stop distance, then capped by leverage and notional limits
+- one position per symbol is open at a time
 
 ## Coinbase Constraints
 
-- Coinbase help currently describes perpetual futures leverage up to `50x` on eligible contracts.
-- If you run the simulator above `50x`, that result is hypothetical rather than Coinbase-faithful.
+- leverage is intentionally capped at `10x` in the Python entrypoints
+- product ids may be passed as aliases like `BTC-PERP`, with client-side normalization for live API calls
 
 ## Example
 
 ```powershell
 py scalping_5min_momentum\back_testing\run_backtest.py `
   --products BTC-PERP ETH-PERP SOL-PERP XRP-PERP `
-  --granularity FIVE_MINUTE `
+  --timeframe-mode strict_1m_on_5m `
+  --signal-granularity ONE_MINUTE `
+  --context-granularity FIVE_MINUTE `
   --days 90 `
   --starting-cash 10000 `
-  --position-allocation 0.81 `
-  --leverage 50 `
+  --leverage 2 `
   --slippage-bps 2
 ```
 

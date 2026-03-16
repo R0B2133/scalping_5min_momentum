@@ -1,1 +1,1 @@
-"""Backtesting utilities for the 5-minute momentum scalper."""
+"""Backtesting utilities for the perpetual futures box-breakout scalper."""
