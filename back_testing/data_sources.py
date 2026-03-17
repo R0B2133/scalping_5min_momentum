@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Union
 
 import pandas as pd  # type: ignore
 
@@ -63,3 +64,29 @@ def load_or_fetch_candles(
     )
     save_candles_to_cache(frame, cache_path)
     return frame, cache_path
+
+
+def load_local_coinbase_csv(csv_path: Union[str, Path]) -> pd.DataFrame:
+    path = Path(csv_path)
+    frame = pd.read_csv(path)
+    timestamp_column = None
+    for candidate in ("timestamp_utc", "timestamp"):
+        if candidate in frame.columns:
+            timestamp_column = candidate
+            break
+    if timestamp_column is None:
+        raise ValueError(
+            f"CSV {path} must contain either 'timestamp_utc' or 'timestamp' columns"
+        )
+
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    missing = [column for column in numeric_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"CSV {path} is missing required OHLCV columns: {missing}")
+
+    frame[timestamp_column] = pd.to_datetime(frame[timestamp_column], utc=True)
+    frame = frame.rename(columns={timestamp_column: "timestamp"})
+    frame = frame.set_index("timestamp").sort_index()
+    frame[numeric_columns] = frame[numeric_columns].astype(float)
+    frame = frame[~frame.index.duplicated(keep="last")]
+    return frame[numeric_columns]

@@ -2,3 +2,5 @@ pandas
 requests
 PyJWT
 cryptography
+scikit-learn
+xgboost

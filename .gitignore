@@ -9,3 +9,4 @@ venv/
 cdp_api_key.json
 back_testing/data/
 back_testing/output/
+back_testing/output_*/

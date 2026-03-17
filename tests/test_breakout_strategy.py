@@ -18,6 +18,7 @@ from scalping_5min_momentum.scalping_strategy import (  # noqa: E402
     PositionState,
     TIMEFRAME_MODE_FIVE_ONLY,
     TIMEFRAME_MODE_STRICT,
+    build_signal_frame,
     calculate_position_size,
     evaluate_signal,
 )
@@ -33,6 +34,85 @@ def _frame_from_rows(rows: list[tuple[str, float, float, float, float, float]]) 
 
 
 class BreakoutStrategyTests(unittest.TestCase):
+    def test_strict_mode_builds_variable_context_boxes(self) -> None:
+        rows = []
+        timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+        for index in range(90):
+            open_price = 100.0 + index * 0.1
+            rows.append(
+                (
+                    timestamp.isoformat(),
+                    open_price,
+                    open_price + 0.25,
+                    open_price - 0.2,
+                    open_price + 0.05,
+                    100 + index,
+                )
+            )
+            timestamp += pd.Timedelta(minutes=1)
+        candles = _frame_from_rows(rows)
+
+        for context_granularity, expected_minutes in (
+            ("FIVE_MINUTE", 5),
+            ("FIFTEEN_MINUTE", 15),
+            ("THIRTY_MINUTE", 30),
+        ):
+            frame = build_signal_frame(
+                candles,
+                BreakoutConfig(
+                    timeframe_mode=TIMEFRAME_MODE_STRICT,
+                    signal_granularity="ONE_MINUTE",
+                    context_granularity=context_granularity,
+                    atr_period=2,
+                    volume_window=2,
+                    min_box_atr_ratio=0.0,
+                    min_volume_ratio=0.0,
+                ),
+            )
+
+            self.assertFalse(frame.empty)
+            latest = frame.iloc[-1]
+            self.assertEqual(
+                latest["box_end"] - latest["box_start"],
+                pd.Timedelta(minutes=expected_minutes),
+            )
+
+    def test_strict_mode_resamples_signal_bars_when_signal_granularity_is_higher(self) -> None:
+        rows = []
+        timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+        for index in range(180):
+            open_price = 100.0 + index * 0.05
+            rows.append(
+                (
+                    timestamp.isoformat(),
+                    open_price,
+                    open_price + 0.2,
+                    open_price - 0.15,
+                    open_price + 0.03,
+                    100 + index,
+                )
+            )
+            timestamp += pd.Timedelta(minutes=1)
+        candles = _frame_from_rows(rows)
+
+        frame = build_signal_frame(
+            candles,
+            BreakoutConfig(
+                timeframe_mode=TIMEFRAME_MODE_STRICT,
+                signal_granularity="FIVE_MINUTE",
+                context_granularity="FIFTEEN_MINUTE",
+                atr_period=3,
+                volume_window=3,
+                min_box_atr_ratio=0.0,
+                min_volume_ratio=0.0,
+            ),
+        )
+
+        self.assertFalse(frame.empty)
+        self.assertEqual(frame.index[1] - frame.index[0], pd.Timedelta(minutes=5))
+        latest = frame.iloc[-1]
+        self.assertEqual(latest["box_end"] - latest["box_start"], pd.Timedelta(minutes=15))
+
     def test_strict_mode_emits_long_breakout(self) -> None:
         candles = _frame_from_rows(
             [
@@ -125,7 +205,7 @@ class BreakoutStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(size_plan.take_profit_price, 101.5, places=6)
 
     def test_load_state_rejects_legacy_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as tmp_dir:
             state_path = Path(tmp_dir) / "legacy_state.json"
             state_path.write_text(
                 json.dumps(

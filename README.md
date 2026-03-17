@@ -2,6 +2,8 @@
 
 Coinbase perpetual futures box-breakout scalper built from the PDF strategy outline.
 
+Current project status: the strategy is being postponed for now. A concise research summary and the latest best-known results are documented in [CURRENT_STRATEGY_STATUS.md](CURRENT_STRATEGY_STATUS.md).
+
 ## What It Includes
 
 - authenticated Coinbase Advanced Trade REST client for candles, fee tiers, product rules, and orders
@@ -86,9 +88,73 @@ py scalping_5min_momentum\run_coinbase_scalper.py `
   --product-id BTC-PERP
 ```
 
+## BTC Optimization Research
+
+Use the saved local `BTC-PERP` minute CSV to run the step-by-step BTC optimization roadmap:
+
+- compare `both`, `long_only`, and `short_only`
+- sweep context boxes across `FIVE_MINUTE`, `FIFTEEN_MINUTE`, and `THIRTY_MINUTE`
+- block the worst UTC trading hours
+- test cooldowns and `one_trade_per_box`
+- tighten box, volume, breakout-distance, and Kalman slope thresholds
+- test stop families plus asymmetric reward/risk, time stops, and breakeven rules
+- validate execution sensitivity with `taker/taker` and `maker/taker`
+
+```powershell
+py scalping_5min_momentum\back_testing\run_walk_forward.py `
+  --mode optimization_sequence `
+  --csv-path scalping_5min_momentum\back_testing\output_local\maker_maker\BTC_PERP_INTX_ONE_MINUTE_20230830_20260316.csv `
+  --product-id BTC-PERP `
+  --output-dir output_btc_optimization_taker_taker
+```
+
+To evaluate one explicit research variant instead of the full sequence:
+
+```powershell
+py scalping_5min_momentum\back_testing\run_walk_forward.py `
+  --mode single_variant `
+  --csv-path scalping_5min_momentum\back_testing\output_local\maker_maker\BTC_PERP_INTX_ONE_MINUTE_20230830_20260316.csv `
+  --product-id BTC-PERP `
+  --side-mode long_only `
+  --blocked-utc-hours 2 3 4 5 `
+  --cooldown-minutes 5 `
+  --one-trade-per-box `
+  --output-dir output_btc_long_only_variant
+```
+
+To run the ML layer separately after a rule-based candidate is stable:
+
+```powershell
+py scalping_5min_momentum\back_testing\run_walk_forward.py `
+  --mode xgboost_filter_research `
+  --csv-path scalping_5min_momentum\back_testing\output_local\maker_maker\BTC_PERP_INTX_ONE_MINUTE_20230830_20260316.csv `
+  --product-id BTC-PERP `
+  --context-granularity FIFTEEN_MINUTE `
+  --side-mode long_only `
+  --output-dir output_btc_xgboost_filter
+```
+
+To learn a rule-based adaptive gate from train-fold breakout history, using volume with breakout and box-quality regimes instead of one fixed threshold:
+
+```powershell
+py scalping_5min_momentum\back_testing\run_walk_forward.py `
+  --mode regime_filter_research `
+  --csv-path scalping_5min_momentum\back_testing\output_local\maker_maker\BTC_PERP_INTX_ONE_MINUTE_20230830_20260316.csv `
+  --product-id BTC-PERP `
+  --context-granularity FIFTEEN_MINUTE `
+  --side-mode long_only `
+  --regime-min-samples 8 `
+  --regime-min-profit-factor 1.0 `
+  --output-dir output_btc_regime_filter
+```
+
 ## Notes
 
 - `paper` mode tracks realized PnL, fees, and mark-to-market equity in the state file.
 - `live` mode uses order preview before submission and can validate without placing orders via `--dry-run`.
 - old state files from the momentum implementation are rejected by schema version.
 - `back_testing` reuses the same breakout logic, with next-bar entry fills and intrabar stop/target checks.
+- `run_walk_forward.py` now defaults to a rule-only optimization sequence and exposes timeframe, stop-family, Kalman-slope, and exit grids directly.
+- `run_walk_forward.py` supports `optimization_sequence`, `single_variant`, `regime_filter_research`, and `xgboost_filter_research` modes.
+- `regime_filter_research` learns allowed breakout regimes from train-fold price/volume history and applies them out of sample through the same backtest engine.
+- the XGBoost layer requires `xgboost`; if it is not installed, the separate ML mode is skipped gracefully and the reason is recorded in the output summary.

@@ -167,9 +167,11 @@ def build_signal_frame(candles: pd.DataFrame, config: BreakoutConfig) -> pd.Data
     frame = candles.copy().sort_index()
     numeric_columns = ["open", "high", "low", "close", "volume"]
     frame[numeric_columns] = frame[numeric_columns].astype(float)
+    signal = _build_signal_bars(frame, normalized)
+    if signal.empty:
+        return pd.DataFrame()
 
-    context = _build_context_frame(frame, normalized)
-    signal = frame.copy()
+    context = _build_context_frame(signal, normalized)
     signal["volume_ma"] = signal["volume"].rolling(normalized.volume_window).mean()
     kalman_state = _compute_kalman_state(
         signal["close"],
@@ -478,6 +480,36 @@ def _build_context_frame(candles: pd.DataFrame, config: BreakoutConfig) -> pd.Da
     context["box_start"] = context.index.to_series().shift(1)
     context["box_end"] = context["box_start"] + pd.to_timedelta(context_seconds, unit="s")
     return context
+
+
+def _build_signal_bars(candles: pd.DataFrame, config: BreakoutConfig) -> pd.DataFrame:
+    signal_seconds = GRANULARITY_TO_SECONDS[config.signal_granularity]
+    base_seconds = _infer_input_granularity_seconds(candles.index)
+    if base_seconds >= signal_seconds:
+        return candles.copy()
+    signal = candles.resample(
+        _seconds_to_frequency(signal_seconds),
+        label="left",
+        closed="left",
+    ).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    )
+    return signal.dropna()
+
+
+def _infer_input_granularity_seconds(index: pd.DatetimeIndex) -> int:
+    if len(index) < 2:
+        return 0
+    deltas = index.to_series().diff().dropna().dt.total_seconds()
+    if deltas.empty:
+        return 0
+    return int(deltas.mode().iloc[0])
 
 
 def _compute_kalman_state(
